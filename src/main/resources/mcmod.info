@@ -1,0 +1,16 @@
+[
+{
+  "modid": "kbanalyzer",
+  "name": "Knockback Analyzer",
+  "description": "Advanced knockback analysis and testing tool. Extracts KB settings, tests them automatically, and tracks players without server detection.",
+  "version": "${version}",
+  "mcversion": "${mcversion}",
+  "url": "",
+  "updateUrl": "",
+  "authorList": ["KB Team"],
+  "credits": "",
+  "logoFile": "",
+  "screenshots": [],
+  "dependencies": []
+}
+]
