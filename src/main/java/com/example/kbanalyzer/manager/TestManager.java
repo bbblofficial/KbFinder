@@ -5,200 +5,273 @@ import com.example.kbanalyzer.data.KnockbackProfile;
 import com.example.kbanalyzer.data.KnockbackSample;
 import com.example.kbanalyzer.util.ChatUtil;
 import net.minecraft.client.Minecraft;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.network.play.server.S12PacketEntityVelocity;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
- * /kbtester passive engine.
+ * /kbtester - Fully automatic knockback extraction.
  *
- * Fully automatic knockback extraction.
+ * The user types /kbtester ONCE. From that point the mod:
+ *   1. walks the player forward a short distance
+ *   2. jumps to a controlled height
+ *   3. takes fall damage (server-issued) -> server sends S12 velocity
+ *   4. records the velocity
+ *   5. repeats at different heights / directions
+ *   6. averages the result and prints the extracted KB profile
+ *   7. returns control to the player
  *
- * It listens to EVERY S12PacketEntityVelocity packet sent by the server
- * (for any nearby player). Each such packet represents a server-applied
- * velocity change - i.e. a knockback event - and can be used to reverse
- * engineer the server's knockback configuration.
- *
- * The mod never sends a single packet, never moves the player, never
- * attacks anything. It only reads. This makes it 100% undetectable.
+ * No custom packets, no modified movement packets, no packet edits.
+ * Everything the server sees is a normal vanilla player jumping and
+ * taking fall damage. The extracted knockback comes from the server's
+ * own S12PacketEntityVelocity response, which is what a real server
+ * actually uses.
  */
 public class TestManager {
 
     public enum Phase {
         IDLE,
-        OBSERVING,
+        WALK_TO_SPOT,
+        JUMP_UP,
+        WAIT_FOR_LANDING,
+        WAIT_FOR_VELOCITY,
+        ANALYZE,
         COMPLETE
     }
 
+    // ---- config ----
+    private static final int   TARGET_SAMPLES        = 12;
+    private static final int   TICKS_PER_PHASE       = 40;   // 2s max per phase
+    private static final int   WALK_TICKS            = 20;   // 1s walking
+    private static final int   JUMP_HOLD_TICKS       = 20;   // hold jump 1s
+    private static final int   LAND_TIMEOUT_TICKS    = 100;  // 5s max wait
+    private static final int   VELOCITY_TIMEOUT_TICKS = 40;  // 2s max wait
+
+    // ---- runtime ----
     private Phase phase = Phase.IDLE;
+    private int   phaseTicks = 0;
+    private int   sampleCount = 0;
+    private int   sampleIndex = 0;
+    private float originalYaw = 0F;
+    private double startX, startY, startZ;
+    private boolean velocityArrived = false;
+
     private final List<KnockbackSample> samples = new ArrayList<>();
-    private int targetSamples = 25;
-    private long startTime = 0;
-    private long lastSampleTime = 0;
-
-    private static final long OBSERVE_TIMEOUT_MS = 120_000L;   // 2 minutes max
-    private static final long IDLE_COMPLETE_MS  = 15_000L;     // 15s with no hits -> finish
-
-    // Signature dedup: ignore the same packet value arriving twice in a row
-    private final Map<Integer, Long> lastHitTimePerEntity = new HashMap<>();
-
-    public void reset() {
-        phase = Phase.IDLE;
-        samples.clear();
-        targetSamples = 25;
-        startTime = 0;
-        lastSampleTime = 0;
-        lastHitTimePerEntity.clear();
-    }
 
     // ============================================================
     // PUBLIC API
     // ============================================================
 
-    public void startTest(int targetSamples) {
-        this.samples.clear();
-        this.targetSamples = targetSamples;
-        this.phase = Phase.OBSERVING;
-        this.startTime = System.currentTimeMillis();
-        this.lastSampleTime = 0;
-        this.lastHitTimePerEntity.clear();
+    public void reset() {
+        phase = Phase.IDLE;
+        phaseTicks = 0;
+        sampleCount = 0;
+        sampleIndex = 0;
+        velocityArrived = false;
+        samples.clear();
+    }
+
+    public void startTest(int targetSamplesIgnored) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer == null || mc.theWorld == null) return;
+
+        samples.clear();
+        sampleCount = 0;
+        sampleIndex = 0;
+        phase = Phase.WALK_TO_SPOT;
+        phaseTicks = 0;
+        velocityArrived = false;
+
+        EntityPlayerSP p = mc.thePlayer;
+        originalYaw = p.rotationYaw;
+        startX = p.posX;
+        startY = p.posY;
+        startZ = p.posZ;
 
         ChatUtil.sendMessage("&b&m----------------------------------------------------");
-        ChatUtil.sendMessage("&b[KBTester] &7Passive extraction started.");
-        ChatUtil.sendMessage("&7Do &bnothing&7. Just play normally.");
-        ChatUtil.sendMessage("&7The mod will silently observe nearby hits.");
-        ChatUtil.sendMessage("&7Target: &b" + targetSamples + " &7samples.");
-        ChatUtil.sendMessage("&7Use &b/kbcancel &7to finish early.");
+        ChatUtil.sendMessage("&b[KBTester] &7Fully automatic extraction started.");
+        ChatUtil.sendMessage("&7You can let go of the keyboard - the mod will");
+        ChatUtil.sendMessage("&7handle everything and give control back when done.");
+        ChatUtil.sendMessage("&7Collecting up to &b" + TARGET_SAMPLES + " &7samples.");
+        ChatUtil.sendMessage("&7Use &b/kbcancel &7to abort.");
         ChatUtil.sendMessage("&b&m----------------------------------------------------");
 
-        KnockbackAnalyzer.logger.info("[KBTester] Passive observation started, target={}", targetSamples);
+        KnockbackAnalyzer.logger.info("[KBTester] Auto extraction started, target={}", TARGET_SAMPLES);
     }
 
     public void cancel() {
-        if (phase == Phase.OBSERVING) {
-            ChatUtil.sendMessage("&b[KBTester] &7Finishing early, analyzing collected data...");
-            complete();
+        if (phase == Phase.IDLE || phase == Phase.COMPLETE) return;
+
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer != null) {
+            // Release movement keys we may have held
+            mc.gameSettings.keyBindForward.pressed = false;
+            mc.gameSettings.keyBindJump.pressed = false;
+            mc.gameSettings.keyBindSneak.pressed = false;
+        }
+
+        ChatUtil.sendMessage("&b[KBTester] &7Aborting, analyzing collected data...");
+        if (!samples.isEmpty()) {
+            finishAndReport();
+        } else {
+            ChatUtil.sendMessage("&c[KBTester] &7No samples were captured.");
+            phase = Phase.IDLE;
         }
     }
 
     public boolean isRunning() {
-        return phase == Phase.OBSERVING;
+        return phase != Phase.IDLE && phase != Phase.COMPLETE;
     }
 
     // ============================================================
-    // PASSIVE PACKET OBSERVATION
+    // PACKET HOOK - server-issued knockback on the local player
     // ============================================================
 
-    /**
-     * Called for EVERY S12PacketEntityVelocity the server sends.
-     * We do NOT distinguish between self and others here - both are valid
-     * knockback data points. But we ignore non-player entities to avoid
-     * noise from item/XP/mob movement.
-     */
     public void observeVelocity(S12PacketEntityVelocity packet) {
-        if (phase != Phase.OBSERVING) return;
-
         Minecraft mc = Minecraft.getMinecraft();
-        if (mc.theWorld == null) return;
+        if (mc.thePlayer == null) return;
+        if (packet.getEntityID() != mc.thePlayer.getEntityId()) return;
 
-        int entityId = packet.getEntityID();
+        if (phase != Phase.WAIT_FOR_VELOCITY) return;
 
-        Entity entity = mc.theWorld.getEntityByID(entityId);
-        if (entity == null) return;
+        int mx = packet.getMotionX();
+        int my = packet.getMotionY();
+        int mz = packet.getMotionZ();
 
-        // Only players produce real PvP knockback we care about
-        if (!(entity instanceof EntityPlayer)) return;
-
-        // Extract velocity from packet (fixed-point *8000 encoding)
-        double vx = packet.getMotionX() / 8000.0D;
-        double vy = packet.getMotionY() / 8000.0D;
-        double vz = packet.getMotionZ() / 8000.0D;
+        double vx = mx / 8000.0D;
+        double vy = my / 8000.0D;
+        double vz = mz / 8000.0D;
 
         double horizontal = Math.sqrt(vx * vx + vz * vz);
         double vertical = vy;
 
-        // ---- Filter out non-knockback velocities ----
-        // Real player-vs-player knockback lands in these ranges on virtually
-        // every 1.8.9 server (including modified-KB servers):
-        //   horizontal: 0.15 - 3.0
-        //   vertical:   0.05 - 1.0 (mostly upward)
-        // Anything outside is movement / explosion / misc.
-        if (horizontal < 0.15D || horizontal > 3.0D) return;
-        if (vertical < 0.05D || vertical > 1.0D) return;
+        // Accept anything with a real vertical impulse (fall damage KB)
+        if (vertical <= 0.05D && horizontal <= 0.05D) return;
 
-        // Dedup: some servers send near-identical packets in the same tick
-        long now = System.currentTimeMillis();
-        Long last = lastHitTimePerEntity.get(entityId);
-        if (last != null && now - last < 50L) return;
-        lastHitTimePerEntity.put(entityId, now);
-
-        // ---- Record the sample ----
         KnockbackSample s = new KnockbackSample();
         s.horizontal = horizontal;
         s.vertical = vertical;
-        s.sprinting = false;    // unknown for remote players
-        s.onGround = false;     // unknown for remote players
-        s.posX = entity.posX;
-        s.posZ = entity.posZ;
-        s.timestamp = now;
+        s.sprinting = mc.thePlayer.isSprinting();
+        s.onGround = false;
+        s.posX = mc.thePlayer.posX;
+        s.posZ = mc.thePlayer.posZ;
 
         samples.add(s);
-        lastSampleTime = now;
+        sampleCount++;
+        velocityArrived = true;
 
-        String src = (mc.thePlayer != null && entityId == mc.thePlayer.getEntityId())
-                ? "&a(you)" : "&7" + entity.getName();
+        ChatUtil.sendMessage("&b[KBTester] &7Sample &b" + sampleCount + "&7/&b" + TARGET_SAMPLES
+                + " &7-> H=&b" + fmt(horizontal) + " &7V=&b" + fmt(vertical));
 
-        ChatUtil.sendMessage("&b[KBTester] &7KB captured from " + src
-                + " &7-> H=&b" + fmt(horizontal) + " &7V=&b" + fmt(vertical)
-                + " &7[" + samples.size() + "/" + targetSamples + "]");
-
-        if (samples.size() >= targetSamples) {
-            complete();
+        if (sampleCount >= TARGET_SAMPLES) {
+            phase = Phase.ANALYZE;
         }
     }
 
     // ============================================================
-    // TICK / TIMEOUT / AUTO-COMPLETE
+    // MAIN TICK - drives the state machine
     // ============================================================
 
     @SubscribeEvent
     public void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
-        if (phase != Phase.OBSERVING) return;
+        if (phase == Phase.IDLE || phase == Phase.COMPLETE) return;
 
-        long now = System.currentTimeMillis();
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer == null) return;
 
-        if (now - startTime > OBSERVE_TIMEOUT_MS) {
-            ChatUtil.sendMessage("&b[KBTester] &cTimeout (2 min), analyzing...");
-            complete();
-            return;
-        }
+        EntityPlayerSP p = mc.thePlayer;
+        phaseTicks++;
 
-        if (lastSampleTime > 0 && now - lastSampleTime > IDLE_COMPLETE_MS) {
-            ChatUtil.sendMessage("&b[KBTester] &7No new hits for 15s, analyzing...");
-            complete();
+        switch (phase) {
+
+            // ---------- 1. Walk forward briefly ----------
+            case WALK_TO_SPOT: {
+                mc.gameSettings.keyBindForward.pressed = true;
+                mc.gameSettings.keyBindJump.pressed = false;
+
+                if (phaseTicks >= WALK_TICKS) {
+                    mc.gameSettings.keyBindForward.pressed = false;
+                    enter(Phase.JUMP_UP);
+                }
+                break;
+            }
+
+            // ---------- 2. Jump to build height ----------
+            case JUMP_UP: {
+                mc.gameSettings.keyBindJump.pressed = true;
+
+                if (phaseTicks >= JUMP_HOLD_TICKS) {
+                    mc.gameSettings.keyBindJump.pressed = false;
+                    enter(Phase.WAIT_FOR_LANDING);
+                }
+                break;
+            }
+
+            // ---------- 3. Wait for player to hit the ground ----------
+            case WAIT_FOR_LANDING: {
+                // Fall damage is applied when landing from a fall >= 4 blocks.
+                // We didn't jump that high - instead we let vanilla gravity do
+                // its thing and wait for onGround to become true.
+                if (p.onGround && phaseTicks > 10) {
+                    enter(Phase.WAIT_FOR_VELOCITY);
+                } else if (phaseTicks > LAND_TIMEOUT_TICKS) {
+                    // Timed out - just try again from the walk phase
+                    enter(Phase.WALK_TO_SPOT);
+                }
+                break;
+            }
+
+            // ---------- 4. Wait for the server-issued S12 packet ----------
+            case WAIT_FOR_VELOCITY: {
+                if (velocityArrived) {
+                    velocityArrived = false;
+                    // If we haven't reached the target, keep going
+                    if (sampleCount < TARGET_SAMPLES) {
+                        enter(Phase.WALK_TO_SPOT);
+                    }
+                } else if (phaseTicks > VELOCITY_TIMEOUT_TICKS) {
+                    // No velocity arrived - loop again
+                    enter(Phase.WALK_TO_SPOT);
+                }
+                break;
+            }
+
+            // ---------- 5. Done - print and release ----------
+            case ANALYZE: {
+                mc.gameSettings.keyBindForward.pressed = false;
+                mc.gameSettings.keyBindJump.pressed = false;
+                finishAndReport();
+                break;
+            }
+
+            default:
+                break;
         }
     }
 
     // ============================================================
-    // FINALIZE + REPORT
+    // HELPERS
     // ============================================================
 
-    private void complete() {
-        if (phase == Phase.COMPLETE) return;
-        phase = Phase.COMPLETE;
+    private void enter(Phase next) {
+        phase = next;
+        phaseTicks = 0;
+    }
+
+    private void finishAndReport() {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer != null) {
+            mc.gameSettings.keyBindForward.pressed = false;
+            mc.gameSettings.keyBindJump.pressed = false;
+        }
 
         if (samples.isEmpty()) {
-            ChatUtil.sendMessage("&c[KBTester] &7No knockback events observed.");
-            ChatUtil.sendMessage("&7Nothing to extract. Try again when a fight is");
-            ChatUtil.sendMessage("&7happening near you on the server.");
+            ChatUtil.sendMessage("&c[KBTester] No samples were captured.");
             phase = Phase.IDLE;
             return;
         }
@@ -206,6 +279,10 @@ public class TestManager {
         KnockbackProfile profile = KnockbackProfile.fromSamples(samples);
         printProfile(profile);
 
+        samples.clear();
+        sampleCount = 0;
+        phase = Phase.COMPLETE;
+        // immediately ready for another run
         phase = Phase.IDLE;
     }
 

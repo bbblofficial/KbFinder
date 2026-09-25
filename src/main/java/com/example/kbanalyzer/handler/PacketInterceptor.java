@@ -10,10 +10,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.play.server.S12PacketEntityVelocity;
 import net.minecraft.network.play.server.S19PacketEntityStatus;
 
-/**
- * Intercepts incoming packets client-side only.
- * Does NOT modify outgoing packets, so no server-side detection.
- */
 public class PacketInterceptor extends ChannelDuplexHandler {
 
     private static final String HANDLER_NAME = "kbanalyzer_handler";
@@ -68,13 +64,10 @@ public class PacketInterceptor extends ChannelDuplexHandler {
             if (msg instanceof S12PacketEntityVelocity) {
                 S12PacketEntityVelocity velocity = (S12PacketEntityVelocity) msg;
 
-                // Passive tester observes EVERY velocity packet (self + others)
-                testManager.observeVelocity(velocity);
-
-                // Active trackers (only fire when their own mode is on)
                 Minecraft mc = Minecraft.getMinecraft();
                 if (mc.thePlayer != null
                         && velocity.getEntityID() == mc.thePlayer.getEntityId()) {
+                    testManager.observeVelocity(velocity);
                     trackingManager.handleLocalVelocity(velocity);
                 }
                 trackingManager.handleTrackedVelocity(velocity);
