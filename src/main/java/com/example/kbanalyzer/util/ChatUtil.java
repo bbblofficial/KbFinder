@@ -11,16 +11,9 @@ public final class ChatUtil {
     public static void sendMessage(String msg) {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.thePlayer == null) return;
-
-        String colored = colorize(msg);
-        mc.thePlayer.addChatMessage(new ChatComponentText(colored));
+        mc.thePlayer.addChatMessage(new ChatComponentText(colorize(msg)));
     }
 
-    /**
-     * Convert &-codes to Minecraft formatting codes (§).
-     * Does NOT depend on EnumChatFormatting.getByChar() which is unavailable
-     * in the stable_20 mappings used for 1.8.8/1.8.9.
-     */
     public static String colorize(String s) {
         if (s == null) return "";
         StringBuilder sb = new StringBuilder();
@@ -40,7 +33,6 @@ public final class ChatUtil {
     }
 
     private static boolean isValidColorCode(char c) {
-        // 0-9 = colors, a-f = colors, k-o = formatting, r = reset
         if (c >= '0' && c <= '9') return true;
         if (c >= 'a' && c <= 'f') return true;
         if (c >= 'k' && c <= 'o') return true;

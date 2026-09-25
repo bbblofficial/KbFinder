@@ -66,37 +66,26 @@ public class PacketInterceptor extends ChannelDuplexHandler {
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
         try {
             if (msg instanceof S12PacketEntityVelocity) {
-                handleVelocity((S12PacketEntityVelocity) msg);
+                S12PacketEntityVelocity velocity = (S12PacketEntityVelocity) msg;
+
+                // Passive tester observes EVERY velocity packet (self + others)
+                testManager.observeVelocity(velocity);
+
+                // Active trackers (only fire when their own mode is on)
+                Minecraft mc = Minecraft.getMinecraft();
+                if (mc.thePlayer != null
+                        && velocity.getEntityID() == mc.thePlayer.getEntityId()) {
+                    trackingManager.handleLocalVelocity(velocity);
+                }
+                trackingManager.handleTrackedVelocity(velocity);
+
             } else if (msg instanceof S19PacketEntityStatus) {
-                handleEntityStatus((S19PacketEntityStatus) msg);
+                trackingManager.handleEntityHurt((S19PacketEntityStatus) msg);
             }
         } catch (Exception e) {
             KnockbackAnalyzer.logger.error("[KB] Error processing packet: {}", e.getMessage());
         }
 
         super.channelRead(ctx, msg);
-    }
-
-    private void handleVelocity(S12PacketEntityVelocity packet) {
-        Minecraft mc = Minecraft.getMinecraft();
-        if (mc.thePlayer == null || mc.theWorld == null) return;
-
-        int entityId = packet.getEntityID();
-
-        if (entityId == mc.thePlayer.getEntityId()) {
-            trackingManager.handleLocalVelocity(packet);
-            testManager.handleLocalVelocity(packet);
-        }
-
-        trackingManager.handleTrackedVelocity(packet);
-    }
-
-    private void handleEntityStatus(S19PacketEntityStatus packet) {
-        Minecraft mc = Minecraft.getMinecraft();
-        if (mc.theWorld == null) return;
-
-        if (packet.getOpCode() == 2) {
-            trackingManager.handleEntityHurt(packet);
-        }
     }
 }

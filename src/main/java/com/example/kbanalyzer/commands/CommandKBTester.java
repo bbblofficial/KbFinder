@@ -9,15 +9,12 @@ import net.minecraft.util.ChatComponentText;
 import java.util.List;
 
 /**
- * /kbtester - The main feature.
+ * /kbtester - Fully automatic passive knockback extraction.
  *
- * Automatically extracts the full knockback configuration of the current
- * server by passively observing incoming velocity packets. No outgoing
- * packets are modified or sent, so it is 100% undetectable server-side.
+ *   /kbtester          -> 25 samples
+ *   /kbtester <count>  -> <count> samples (5-100)
  *
- * Usage:
- *   /kbtester          -> collect 10 samples
- *   /kbtester <count>  -> collect <count> samples (1-100)
+ * No movement. No attacks. No outgoing packets.
  */
 public class CommandKBTester extends CommandBase {
 
@@ -28,7 +25,7 @@ public class CommandKBTester extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/kbtester [samples] - Auto-extract server knockback settings (client-side only)";
+        return "/kbtester [samples] - Passively extract server knockback settings";
     }
 
     @Override
@@ -38,13 +35,14 @@ public class CommandKBTester extends CommandBase {
 
     @Override
     public void processCommand(ICommandSender sender, String[] args) {
-        int count = 10;
+        int count = 25;
 
         if (args.length >= 1) {
             try {
                 count = Integer.parseInt(args[0]);
-                if (count < 1 || count > 100) {
-                    sender.addChatMessage(new ChatComponentText("Sample count must be between 1 and 100"));
+                if (count < 5 || count > 100) {
+                    sender.addChatMessage(new ChatComponentText(
+                            "Sample count must be between 5 and 100"));
                     return;
                 }
             } catch (NumberFormatException e) {
@@ -59,7 +57,7 @@ public class CommandKBTester extends CommandBase {
     @Override
     public List<String> addTabCompletionOptions(ICommandSender sender, String[] args, BlockPos pos) {
         if (args.length == 1) {
-            return getListOfStringsMatchingLastWord(args, "5", "10", "15", "20", "30", "50");
+            return getListOfStringsMatchingLastWord(args, "10", "20", "25", "50", "100");
         }
         return null;
     }

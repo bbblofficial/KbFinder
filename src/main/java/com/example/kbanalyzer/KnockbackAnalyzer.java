@@ -106,9 +106,8 @@ public class KnockbackAnalyzer {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.thePlayer == null || mc.getNetHandler() == null) return;
 
-        // Make sure the packet handler is injected on the current connection.
-        // (TrackingManager and TestManager handle their own ticks via the
-        // Forge event bus, so we don't call them here.)
+        // Managers tick themselves via the Forge event bus.
+        // Here we only make sure the packet handler stays injected.
         if (packetInterceptor == null || !packetInterceptor.isInjected()) {
             injectPacketHandler(mc);
         }
