@@ -18,18 +18,15 @@ import java.util.List;
  *
  * The user types /kbtester ONCE. From that point the mod:
  *   1. walks the player forward a short distance
- *   2. jumps to a controlled height
- *   3. takes fall damage (server-issued) -> server sends S12 velocity
+ *   2. jumps to build height
+ *   3. lands and takes fall damage (server-issued) -> server sends S12
  *   4. records the velocity
- *   5. repeats at different heights / directions
+ *   5. repeats at different spots / heights
  *   6. averages the result and prints the extracted KB profile
  *   7. returns control to the player
  *
- * No custom packets, no modified movement packets, no packet edits.
- * Everything the server sees is a normal vanilla player jumping and
- * taking fall damage. The extracted knockback comes from the server's
- * own S12PacketEntityVelocity response, which is what a real server
- * actually uses.
+ * Uses movementInput (the same thing real key presses modify) so the
+ * server sees exactly what it sees from a normal player bunny-hopping.
  */
 public class TestManager {
 
@@ -44,20 +41,16 @@ public class TestManager {
     }
 
     // ---- config ----
-    private static final int   TARGET_SAMPLES        = 12;
-    private static final int   TICKS_PER_PHASE       = 40;   // 2s max per phase
-    private static final int   WALK_TICKS            = 20;   // 1s walking
-    private static final int   JUMP_HOLD_TICKS       = 20;   // hold jump 1s
-    private static final int   LAND_TIMEOUT_TICKS    = 100;  // 5s max wait
-    private static final int   VELOCITY_TIMEOUT_TICKS = 40;  // 2s max wait
+    private static final int TARGET_SAMPLES         = 12;
+    private static final int WALK_TICKS             = 20;
+    private static final int JUMP_HOLD_TICKS        = 20;
+    private static final int LAND_TIMEOUT_TICKS     = 100;
+    private static final int VELOCITY_TIMEOUT_TICKS = 40;
 
     // ---- runtime ----
     private Phase phase = Phase.IDLE;
     private int   phaseTicks = 0;
     private int   sampleCount = 0;
-    private int   sampleIndex = 0;
-    private float originalYaw = 0F;
-    private double startX, startY, startZ;
     private boolean velocityArrived = false;
 
     private final List<KnockbackSample> samples = new ArrayList<>();
@@ -70,27 +63,19 @@ public class TestManager {
         phase = Phase.IDLE;
         phaseTicks = 0;
         sampleCount = 0;
-        sampleIndex = 0;
         velocityArrived = false;
         samples.clear();
     }
 
-    public void startTest(int targetSamplesIgnored) {
+    public void startTest(int unused) {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.thePlayer == null || mc.theWorld == null) return;
 
         samples.clear();
         sampleCount = 0;
-        sampleIndex = 0;
         phase = Phase.WALK_TO_SPOT;
         phaseTicks = 0;
         velocityArrived = false;
-
-        EntityPlayerSP p = mc.thePlayer;
-        originalYaw = p.rotationYaw;
-        startX = p.posX;
-        startY = p.posY;
-        startZ = p.posZ;
 
         ChatUtil.sendMessage("&b&m----------------------------------------------------");
         ChatUtil.sendMessage("&b[KBTester] &7Fully automatic extraction started.");
@@ -105,14 +90,7 @@ public class TestManager {
 
     public void cancel() {
         if (phase == Phase.IDLE || phase == Phase.COMPLETE) return;
-
-        Minecraft mc = Minecraft.getMinecraft();
-        if (mc.thePlayer != null) {
-            // Release movement keys we may have held
-            mc.gameSettings.keyBindForward.pressed = false;
-            mc.gameSettings.keyBindJump.pressed = false;
-            mc.gameSettings.keyBindSneak.pressed = false;
-        }
+        releaseInputs();
 
         ChatUtil.sendMessage("&b[KBTester] &7Aborting, analyzing collected data...");
         if (!samples.isEmpty()) {
@@ -135,7 +113,6 @@ public class TestManager {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.thePlayer == null) return;
         if (packet.getEntityID() != mc.thePlayer.getEntityId()) return;
-
         if (phase != Phase.WAIT_FOR_VELOCITY) return;
 
         int mx = packet.getMotionX();
@@ -149,7 +126,6 @@ public class TestManager {
         double horizontal = Math.sqrt(vx * vx + vz * vz);
         double vertical = vy;
 
-        // Accept anything with a real vertical impulse (fall damage KB)
         if (vertical <= 0.05D && horizontal <= 0.05D) return;
 
         KnockbackSample s = new KnockbackSample();
@@ -173,7 +149,7 @@ public class TestManager {
     }
 
     // ============================================================
-    // MAIN TICK - drives the state machine
+    // MAIN TICK - state machine
     // ============================================================
 
     @SubscribeEvent
@@ -189,62 +165,50 @@ public class TestManager {
 
         switch (phase) {
 
-            // ---------- 1. Walk forward briefly ----------
             case WALK_TO_SPOT: {
-                mc.gameSettings.keyBindForward.pressed = true;
-                mc.gameSettings.keyBindJump.pressed = false;
+                p.movementInput.moveForward = 1.0F;
+                p.movementInput.jump = false;
 
                 if (phaseTicks >= WALK_TICKS) {
-                    mc.gameSettings.keyBindForward.pressed = false;
+                    p.movementInput.moveForward = 0F;
                     enter(Phase.JUMP_UP);
                 }
                 break;
             }
 
-            // ---------- 2. Jump to build height ----------
             case JUMP_UP: {
-                mc.gameSettings.keyBindJump.pressed = true;
+                p.movementInput.jump = true;
 
                 if (phaseTicks >= JUMP_HOLD_TICKS) {
-                    mc.gameSettings.keyBindJump.pressed = false;
+                    p.movementInput.jump = false;
                     enter(Phase.WAIT_FOR_LANDING);
                 }
                 break;
             }
 
-            // ---------- 3. Wait for player to hit the ground ----------
             case WAIT_FOR_LANDING: {
-                // Fall damage is applied when landing from a fall >= 4 blocks.
-                // We didn't jump that high - instead we let vanilla gravity do
-                // its thing and wait for onGround to become true.
                 if (p.onGround && phaseTicks > 10) {
                     enter(Phase.WAIT_FOR_VELOCITY);
                 } else if (phaseTicks > LAND_TIMEOUT_TICKS) {
-                    // Timed out - just try again from the walk phase
                     enter(Phase.WALK_TO_SPOT);
                 }
                 break;
             }
 
-            // ---------- 4. Wait for the server-issued S12 packet ----------
             case WAIT_FOR_VELOCITY: {
                 if (velocityArrived) {
                     velocityArrived = false;
-                    // If we haven't reached the target, keep going
                     if (sampleCount < TARGET_SAMPLES) {
                         enter(Phase.WALK_TO_SPOT);
                     }
                 } else if (phaseTicks > VELOCITY_TIMEOUT_TICKS) {
-                    // No velocity arrived - loop again
                     enter(Phase.WALK_TO_SPOT);
                 }
                 break;
             }
 
-            // ---------- 5. Done - print and release ----------
             case ANALYZE: {
-                mc.gameSettings.keyBindForward.pressed = false;
-                mc.gameSettings.keyBindJump.pressed = false;
+                releaseInputs();
                 finishAndReport();
                 break;
             }
@@ -263,12 +227,17 @@ public class TestManager {
         phaseTicks = 0;
     }
 
-    private void finishAndReport() {
+    private void releaseInputs() {
         Minecraft mc = Minecraft.getMinecraft();
-        if (mc.thePlayer != null) {
-            mc.gameSettings.keyBindForward.pressed = false;
-            mc.gameSettings.keyBindJump.pressed = false;
-        }
+        if (mc.thePlayer == null) return;
+        mc.thePlayer.movementInput.moveForward = 0F;
+        mc.thePlayer.movementInput.moveStrafe  = 0F;
+        mc.thePlayer.movementInput.jump        = false;
+        mc.thePlayer.movementInput.sneak       = false;
+    }
+
+    private void finishAndReport() {
+        releaseInputs();
 
         if (samples.isEmpty()) {
             ChatUtil.sendMessage("&c[KBTester] No samples were captured.");
@@ -281,8 +250,6 @@ public class TestManager {
 
         samples.clear();
         sampleCount = 0;
-        phase = Phase.COMPLETE;
-        // immediately ready for another run
         phase = Phase.IDLE;
     }
 
