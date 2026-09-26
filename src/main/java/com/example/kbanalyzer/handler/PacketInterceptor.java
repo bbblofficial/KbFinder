@@ -1,7 +1,6 @@
 package com.example.kbanalyzer.handler;
 
 import com.example.kbanalyzer.KnockbackAnalyzer;
-import com.example.kbanalyzer.manager.TestManager;
 import com.example.kbanalyzer.manager.TrackingManager;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
@@ -10,17 +9,19 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.play.server.S12PacketEntityVelocity;
 import net.minecraft.network.play.server.S19PacketEntityStatus;
 
+/**
+ * Intercepts incoming packets client-side only.
+ * Does NOT modify outgoing packets, so no server-side detection.
+ */
 public class PacketInterceptor extends ChannelDuplexHandler {
 
     private static final String HANDLER_NAME = "kbanalyzer_handler";
 
     private final TrackingManager trackingManager;
-    private final TestManager testManager;
     private boolean injected = false;
 
-    public PacketInterceptor(TrackingManager trackingManager, TestManager testManager) {
+    public PacketInterceptor(TrackingManager trackingManager) {
         this.trackingManager = trackingManager;
-        this.testManager = testManager;
     }
 
     public boolean isInjected() {
@@ -63,15 +64,8 @@ public class PacketInterceptor extends ChannelDuplexHandler {
         try {
             if (msg instanceof S12PacketEntityVelocity) {
                 S12PacketEntityVelocity velocity = (S12PacketEntityVelocity) msg;
-
-                Minecraft mc = Minecraft.getMinecraft();
-                if (mc.thePlayer != null
-                        && velocity.getEntityID() == mc.thePlayer.getEntityId()) {
-                    testManager.observeVelocity(velocity);
-                    trackingManager.handleLocalVelocity(velocity);
-                }
+                trackingManager.handleLocalVelocity(velocity);
                 trackingManager.handleTrackedVelocity(velocity);
-
             } else if (msg instanceof S19PacketEntityStatus) {
                 trackingManager.handleEntityHurt((S19PacketEntityStatus) msg);
             }

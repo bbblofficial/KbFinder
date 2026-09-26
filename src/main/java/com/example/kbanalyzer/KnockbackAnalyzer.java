@@ -3,11 +3,9 @@ package com.example.kbanalyzer;
 import com.example.kbanalyzer.commands.CommandFindKB;
 import com.example.kbanalyzer.commands.CommandKBCancel;
 import com.example.kbanalyzer.commands.CommandKBCenter;
-import com.example.kbanalyzer.commands.CommandKBTester;
 import com.example.kbanalyzer.commands.CommandKBTrack;
 import com.example.kbanalyzer.commands.CommandKBVelocity;
 import com.example.kbanalyzer.handler.PacketInterceptor;
-import com.example.kbanalyzer.manager.TestManager;
 import com.example.kbanalyzer.manager.TrackingManager;
 import com.example.kbanalyzer.util.ChatUtil;
 import net.minecraft.client.Minecraft;
@@ -38,7 +36,6 @@ public class KnockbackAnalyzer {
     private static KnockbackAnalyzer instance;
 
     private final TrackingManager trackingManager = new TrackingManager();
-    private final TestManager testManager = new TestManager();
     private PacketInterceptor packetInterceptor;
 
     public static KnockbackAnalyzer getInstance() {
@@ -47,10 +44,6 @@ public class KnockbackAnalyzer {
 
     public TrackingManager getTrackingManager() {
         return trackingManager;
-    }
-
-    public TestManager getTestManager() {
-        return testManager;
     }
 
     @Mod.EventHandler
@@ -64,14 +57,12 @@ public class KnockbackAnalyzer {
     public void init(FMLInitializationEvent event) {
         MinecraftForge.EVENT_BUS.register(this);
         MinecraftForge.EVENT_BUS.register(trackingManager);
-        MinecraftForge.EVENT_BUS.register(testManager);
 
         ClientCommandHandler.instance.registerCommand(new CommandFindKB());
         ClientCommandHandler.instance.registerCommand(new CommandKBCenter());
         ClientCommandHandler.instance.registerCommand(new CommandKBCancel());
         ClientCommandHandler.instance.registerCommand(new CommandKBVelocity());
         ClientCommandHandler.instance.registerCommand(new CommandKBTrack());
-        ClientCommandHandler.instance.registerCommand(new CommandKBTester());
 
         logger.info("[KB] Commands registered!");
     }
@@ -80,7 +71,6 @@ public class KnockbackAnalyzer {
     public void onClientConnected(FMLNetworkEvent.ClientConnectedToServerEvent event) {
         logger.info("[KB] Connected to server, resetting state");
         trackingManager.reset();
-        testManager.reset();
 
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.getNetHandler() != null) {
@@ -92,7 +82,6 @@ public class KnockbackAnalyzer {
     public void onClientDisconnected(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
         logger.info("[KB] Disconnected, resetting state");
         trackingManager.reset();
-        testManager.reset();
         if (packetInterceptor != null) {
             packetInterceptor.uninject();
             packetInterceptor = null;
@@ -106,8 +95,6 @@ public class KnockbackAnalyzer {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.thePlayer == null || mc.getNetHandler() == null) return;
 
-        // Managers tick themselves via the Forge event bus.
-        // Here we only make sure the packet handler stays injected.
         if (packetInterceptor == null || !packetInterceptor.isInjected()) {
             injectPacketHandler(mc);
         }
@@ -116,7 +103,7 @@ public class KnockbackAnalyzer {
     private void injectPacketHandler(Minecraft mc) {
         try {
             if (packetInterceptor == null) {
-                packetInterceptor = new PacketInterceptor(trackingManager, testManager);
+                packetInterceptor = new PacketInterceptor(trackingManager);
             }
             packetInterceptor.inject(mc);
         } catch (Exception e) {
